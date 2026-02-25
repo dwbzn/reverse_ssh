@@ -38,6 +38,7 @@ type BuildConfig struct {
 	Proxy, SNI, LogLevel string
 
 	UseKerberosAuth bool
+	NAT             bool
 
 	SharedLibrary bool
 	UPX           bool
@@ -59,12 +60,20 @@ func Build(config BuildConfig) (string, error) {
 		return "", errors.New("web server is not enabled")
 	}
 
+	if config.NAT {
+		token := NATToken()
+		if token == "" {
+			return "", errors.New("nat transport is not enabled on this server")
+		}
+		config.ConnectBackAdress = "nat://" + token
+	}
+
 	if len(config.GOARCH) != 0 && !validArchs[config.GOARCH] {
-		return "", fmt.Errorf("GOARCH supplied is not valid: " + config.GOARCH)
+		return "", fmt.Errorf("GOARCH supplied is not valid: %s", config.GOARCH)
 	}
 
 	if len(config.GOOS) != 0 && !validPlatforms[config.GOOS] {
-		return "", fmt.Errorf("GOOS supplied is not valid: " + config.GOOS)
+		return "", fmt.Errorf("GOOS supplied is not valid: %s", config.GOOS)
 	}
 
 	if len(config.Fingerprint) == 0 {
@@ -211,14 +220,14 @@ func Build(config BuildConfig) (string, error) {
 			strings.Contains(err.Error(), "undefined reference to") {
 			// Try to recover if the linking fails by clearing the cache
 			if cleanErr := exec.Command("go", "clean", "-cache").Run(); cleanErr != nil {
-				return "", fmt.Errorf("Error (was unable to automatically clean cache): " + err.Error() + "\n" + string(output))
+				return "", fmt.Errorf("build failed (%v) and go clean -cache failed: %w\n%s", err, cleanErr, string(output))
 			}
 			output, err = cmd.CombinedOutput()
 			if err != nil {
-				return "", fmt.Errorf("Error: " + err.Error() + "\n" + string(output))
+				return "", fmt.Errorf("build failed: %w\n%s", err, string(output))
 			}
 		} else {
-			return "", fmt.Errorf("Error: " + err.Error() + "\n" + string(output))
+			return "", fmt.Errorf("build failed: %w\n%s", err, string(output))
 		}
 	}
 

@@ -22,6 +22,7 @@ import (
 	"github.com/NHAS/reverse_ssh/internal/client/connection"
 	"github.com/NHAS/reverse_ssh/internal/client/handlers"
 	"github.com/NHAS/reverse_ssh/internal/client/keys"
+	"github.com/NHAS/reverse_ssh/internal/nat"
 	"github.com/NHAS/reverse_ssh/pkg/logger"
 	"github.com/bodgit/ntlmssp"
 	"golang.org/x/crypto/ssh"
@@ -390,6 +391,11 @@ func Run(settings *Settings) {
 	}
 
 	realAddr, scheme := determineConnectionType(settings.Addr)
+	if scheme == nat.Scheme {
+		if _, err := nat.ParseDestination(settings.Addr); err != nil {
+			log.Fatalf("Invalid NAT destination %q: %v", settings.Addr, err)
+		}
+	}
 
 	// fetch the environment variables, but the first proxy is done from the supplied proxyAddr arg
 	potentialProxies := getCaseInsensitiveEnv("http_proxy", "https_proxy")
@@ -397,7 +403,15 @@ func Run(settings *Settings) {
 	initialProxyAddr := settings.ProxyAddr
 	for {
 		var conn net.Conn
-		if scheme != "stdio" {
+		if scheme == nat.Scheme {
+			log.Println("Connecting to", settings.Addr)
+			conn, err = nat.Dial(settings.Addr, settings.ConnectTimeout)
+			if err != nil {
+				log.Printf("Unable to connect NAT: %v\n", err)
+				time.Sleep(10 * time.Second)
+				continue
+			}
+		} else if scheme != "stdio" {
 			log.Println("Connecting to", settings.Addr)
 
 			// First create raw TCP connection
@@ -665,6 +679,8 @@ func determineConnectionType(addr string) (resultingAddr, transport string) {
 			return u.Host + ":80", u.Scheme
 		case "stdio":
 			return "stdio://nothing", u.Scheme
+		case nat.Scheme:
+			return u.Host, u.Scheme
 		}
 
 		log.Println("url scheme ", u.Scheme, "not recognised falling back to ssh: ", u.Host+":22", "as no port specified")

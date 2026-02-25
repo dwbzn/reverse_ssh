@@ -9,6 +9,7 @@ import (
 	"sort"
 	"strings"
 
+	"github.com/NHAS/reverse_ssh/internal/nat"
 	"github.com/NHAS/reverse_ssh/internal/server/data"
 	"github.com/NHAS/reverse_ssh/internal/server/users"
 	"github.com/NHAS/reverse_ssh/internal/server/webserver"
@@ -22,6 +23,40 @@ type link struct {
 }
 
 var spaceMatcher = regexp.MustCompile(`[\s]+`)
+
+type transportSelection struct {
+	flag   string
+	scheme string
+}
+
+var linkTransports = []transportSelection{
+	{flag: "tls", scheme: "tls://"},
+	{flag: "wss", scheme: "wss://"},
+	{flag: "ws", scheme: "ws://"},
+	{flag: "stdio", scheme: "stdio://"},
+	{flag: "http", scheme: "http://"},
+	{flag: "https", scheme: "https://"},
+	{flag: nat.Scheme, scheme: ""},
+}
+
+func selectedTransportFlags(line terminal.ParsedLine) (selected []transportSelection) {
+	for _, transport := range linkTransports {
+		if !line.IsSet(transport.flag) {
+			continue
+		}
+
+		selected = append(selected, transport)
+	}
+	return selected
+}
+
+func selectedTransportNames(selected []transportSelection) []string {
+	names := make([]string, 0, len(selected))
+	for _, transport := range selected {
+		names = append(names, transport.flag)
+	}
+	return names
+}
 
 func (l *link) ValidArgs() map[string]string {
 
@@ -41,6 +76,7 @@ func (l *link) ValidArgs() map[string]string {
 		"stdio":             "Use stdin and stdout as transport, will disable logging, destination after stdio:// is ignored",
 		"http":              "Use http polling as the underlying transport",
 		"https":             "Use https polling as the underlying transport",
+		"nat":               "Use native NAT transport (direct + relay fallback) as the underlying transport",
 		"use-host-header":   "Use HTTP Host header as callback address when generating download template (add .sh to your download urls and find out)",
 		"shared-object":     "Generate shared object file",
 		"fingerprint":       "Set RSSH server fingerprint will default to server public key",
@@ -158,29 +194,19 @@ func (l *link) Run(user *users.User, tty io.ReadWriter, line terminal.ParsedLine
 
 	buildConfig.UseHostHeader = line.IsSet("use-host-header")
 
-	tt := map[string]bool{
-		"tls":   line.IsSet("tls"),
-		"wss":   line.IsSet("wss"),
-		"ws":    line.IsSet("ws"),
-		"stdio": line.IsSet("stdio"),
-		"http":  line.IsSet("http"),
-		"https": line.IsSet("https"),
+	selectedTransports := selectedTransportFlags(line)
+	if len(selectedTransports) > 1 {
+		return fmt.Errorf("cannot combine transport flags: %s", strings.Join(selectedTransportNames(selectedTransports), ", "))
 	}
 
-	numberTrue := 0
-	scheme := ""
-	for i := range tt {
-		if tt[i] {
-			numberTrue++
-			scheme = i + "://"
+	if len(selectedTransports) == 1 {
+		selectedTransport := selectedTransports[0]
+		if selectedTransport.flag == nat.Scheme {
+			buildConfig.NAT = true
+		} else {
+			buildConfig.ConnectBackAdress = selectedTransport.scheme + buildConfig.ConnectBackAdress
 		}
 	}
-
-	if numberTrue > 1 {
-		return errors.New("cant use tls/wss/ws/std/http/https flags together (only supports one per client)")
-	}
-
-	buildConfig.ConnectBackAdress = scheme + buildConfig.ConnectBackAdress
 
 	buildConfig.Name, err = line.GetArgString("name")
 	if err != nil && err != terminal.ErrFlagNotSet {
@@ -222,7 +248,7 @@ func (l *link) Run(user *users.User, tty io.ReadWriter, line terminal.ParsedLine
 	} else {
 		_, err := logger.StrToUrgency(buildConfig.LogLevel)
 		if err != nil {
-			return fmt.Errorf("could to turn log-level %q into log urgency (probably an invalid setting)", err)
+			return fmt.Errorf("could not parse log-level %q: %w", buildConfig.LogLevel, err)
 		}
 	}
 

@@ -1,0 +1,132 @@
+package nat
+
+import (
+	"context"
+	"crypto/rand"
+	"fmt"
+	"log"
+	"net"
+	"sync"
+	"time"
+)
+
+func Dial(destination string, timeout time.Duration) (net.Conn, error) {
+	token, err := ParseDestination(destination)
+	if err != nil {
+		return nil, err
+	}
+
+	if timeout <= 0 {
+		timeout = 8 * time.Second
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), timeout)
+	defer cancel()
+
+	derpMap, err := FetchDERPMap(ctx, "")
+	if err != nil {
+		return nil, fmt.Errorf("nat derp map fetch failed: %w", err)
+	}
+
+	_, derpNode, err := pickDERPNodeForClient(derpMap, int(token.PreferredRegion))
+	if err != nil {
+		return nil, fmt.Errorf("nat derp node selection failed: %w", err)
+	}
+
+	derpPrivate, _, err := randomDERPIdentity()
+	if err != nil {
+		return nil, fmt.Errorf("nat derp key generation failed: %w", err)
+	}
+
+	derpClient, err := newDERPClient(ctx, derpNode, derpPrivate)
+	if err != nil {
+		return nil, fmt.Errorf("nat derp connect failed: %w", err)
+	}
+
+	var sessionID [16]byte
+	if _, err := rand.Read(sessionID[:]); err != nil {
+		_ = derpClient.Close()
+		return nil, err
+	}
+
+	sendSignal := func(message signalMessage) error {
+		raw := encodeSignalMessage(message)
+		return derpClient.Send(token.ServerDERPPublicKey, raw)
+	}
+
+	var closeOnce sync.Once
+	closeDERP := func() {
+		closeOnce.Do(func() {
+			_ = derpClient.Close()
+		})
+	}
+
+	relay := newRelayConn(sessionID, "relay", token.ServerDERPPublicKey, sendSignal, closeDERP)
+	ackCh := make(chan struct{}, 1)
+	recvErrCh := make(chan error, 1)
+
+	go func() {
+		defer close(recvErrCh)
+		for {
+			packet, err := derpClient.Recv()
+			if err != nil {
+				relay.markRemoteClosed()
+				recvErrCh <- err
+				return
+			}
+			if packet.Source != token.ServerDERPPublicKey {
+				continue
+			}
+
+			msg, err := decodeSignalMessage(packet.Payload)
+			if err != nil {
+				continue
+			}
+			if msg.SessionID != sessionID {
+				continue
+			}
+
+			switch msg.Type {
+			case signalDialAck:
+				if _, err := unmarshalDialAck(msg.Payload); err != nil {
+					continue
+				}
+				select {
+				case ackCh <- struct{}{}:
+				default:
+				}
+			case signalData:
+				relay.pushIncoming(msg.Payload)
+			case signalClose:
+				relay.markRemoteClosed()
+			}
+		}
+	}()
+
+	initPayload, err := marshalDialInit(dialInitMessage{})
+	if err != nil {
+		closeDERP()
+		return nil, err
+	}
+
+	if err := sendSignal(signalMessage{
+		Type:      signalDialInit,
+		SessionID: sessionID,
+		Payload:   initPayload,
+	}); err != nil {
+		closeDERP()
+		return nil, err
+	}
+
+	select {
+	case <-ackCh:
+		log.Println("nat: relay session established")
+		return relay, nil
+	case err := <-recvErrCh:
+		closeDERP()
+		return nil, fmt.Errorf("nat derp session failed before ack: %w", err)
+	case <-time.After(5 * time.Second):
+		closeDERP()
+		return nil, fmt.Errorf("nat derp session acknowledgement timeout")
+	}
+}

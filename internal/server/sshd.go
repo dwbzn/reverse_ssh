@@ -14,12 +14,24 @@ import (
 	"time"
 
 	"github.com/NHAS/reverse_ssh/internal"
+	"github.com/NHAS/reverse_ssh/internal/nat"
 	"github.com/NHAS/reverse_ssh/internal/server/handlers"
 	"github.com/NHAS/reverse_ssh/internal/server/observers"
 	"github.com/NHAS/reverse_ssh/internal/server/users"
 	"github.com/NHAS/reverse_ssh/pkg/logger"
 	"github.com/fatih/color"
 	"golang.org/x/crypto/ssh"
+)
+
+const (
+	roleUser   = "user"
+	roleClient = "client"
+	roleProxy  = "proxy"
+
+	privilegeAdmin = "5"
+	privilegeUser  = "0"
+
+	remoteForwardAddrNetwork = "remote_forward_tcp"
 )
 
 type Options struct {
@@ -120,17 +132,17 @@ func ParseAddress(address string) (cidr []*net.IPNet, err error) {
 		_, all, _ := net.ParseCIDR("0.0.0.0/0")
 		_, allv6, _ := net.ParseCIDR("::/0")
 		cidr = append(cidr, all, allv6)
-		return
+		return cidr, nil
 	}
 
 	_, mask, err := net.ParseCIDR(address)
 	if err == nil {
 		cidr = append(cidr, mask)
-		return
+		return cidr, nil
 	}
 
 	ip := net.ParseIP(address)
-	if ip == nil {
+	if ip != nil {
 		var newcidr net.IPNet
 		newcidr.IP = ip
 		newcidr.Mask = net.CIDRMask(32, 32)
@@ -140,7 +152,7 @@ func ParseAddress(address string) (cidr []*net.IPNet, err error) {
 		}
 
 		cidr = append(cidr, &newcidr)
-		return
+		return cidr, nil
 	}
 
 	addresses, err := net.LookupIP(address)
@@ -164,13 +176,16 @@ func ParseAddress(address string) (cidr []*net.IPNet, err error) {
 		return nil, errors.New("Unable to find domains for " + address)
 	}
 
-	return
+	return cidr, nil
 }
 
 var ErrKeyNotInList = errors.New("key not found")
 
 func CheckAuth(keysPath string, publicKey ssh.PublicKey, src net.IP, insecure bool) (*ssh.Permissions, error) {
+	return CheckAuthWithSourceTrust(keysPath, publicKey, src, insecure, true)
+}
 
+func CheckAuthWithSourceTrust(keysPath string, publicKey ssh.PublicKey, src net.IP, insecure bool, sourceTrusted bool) (*ssh.Permissions, error) {
 	keys, err := readPubKeys(keysPath)
 	if err != nil {
 		return nil, ErrKeyNotInList
@@ -184,22 +199,33 @@ func CheckAuth(keysPath string, publicKey ssh.PublicKey, src net.IP, insecure bo
 			return nil, ErrKeyNotInList
 		}
 
-		for _, deny := range opt.DenyList {
-			if deny.Contains(src) {
-				return nil, fmt.Errorf("not authorized ip on deny list")
-			}
+		hasSourceRestrictions := len(opt.DenyList) > 0 || len(opt.AllowList) > 0
+		if !sourceTrusted && hasSourceRestrictions {
+			return nil, fmt.Errorf("not authorized: source address restrictions cannot be evaluated on this transport")
 		}
 
-		safe := len(opt.AllowList) == 0
-		for _, allow := range opt.AllowList {
-			if allow.Contains(src) {
-				safe = true
-				break
+		if sourceTrusted {
+			if src == nil {
+				return nil, fmt.Errorf("not authorized: source ip could not be determined")
 			}
-		}
 
-		if !safe {
-			return nil, fmt.Errorf("not authorized not on allow list")
+			for _, deny := range opt.DenyList {
+				if deny.Contains(src) {
+					return nil, fmt.Errorf("not authorized ip on deny list")
+				}
+			}
+
+			safe := len(opt.AllowList) == 0
+			for _, allow := range opt.AllowList {
+				if allow.Contains(src) {
+					safe = true
+					break
+				}
+			}
+
+			if !safe {
+				return nil, fmt.Errorf("not authorized not on allow list")
+			}
 		}
 	}
 
@@ -246,6 +272,38 @@ func isDirEmpty(name string) bool {
 }
 
 func StartSSHServer(sshListener net.Listener, privateKey ssh.Signer, insecure, openproxy bool, dataDir string, timeout int) {
+	startSSHServer(sshListener, privateKey, insecure, openproxy, dataDir, timeout, nil, false)
+}
+
+func StartSSHServerRestricted(sshListener net.Listener, privateKey ssh.Signer, insecure, openproxy bool, dataDir string, timeout int, allowedRoles map[string]bool, restrictedSource bool) {
+	startSSHServer(sshListener, privateKey, insecure, openproxy, dataDir, timeout, allowedRoles, restrictedSource)
+}
+
+func isSourceTrusted(remoteNetwork string) bool {
+	return remoteNetwork != remoteForwardAddrNetwork && remoteNetwork != nat.RelayAddrNetwork
+}
+
+func setUserPermissions(perm *ssh.Permissions, privilege string) {
+	perm.Extensions["type"] = roleUser
+	perm.Extensions["privilege"] = privilege
+}
+
+func untrustedUserLoginError(role, username, remoteNetwork string) error {
+	quotedUser := strconv.QuoteToGraphic(username)
+	if remoteNetwork == nat.RelayAddrNetwork {
+		return fmt.Errorf("%s (%s) denied login: cannot connect %ss via nat relay transport", role, quotedUser, role)
+	}
+	return fmt.Errorf("%s (%s) denied login: cannot connect %ss via pivoted server port (may result in allow list bypass)", role, quotedUser, role)
+}
+
+func roleAllowed(allowedRoles map[string]bool, role string) bool {
+	if len(allowedRoles) == 0 {
+		return true
+	}
+	return allowedRoles[role]
+}
+
+func startSSHServer(sshListener net.Listener, privateKey ssh.Signer, insecure, openproxy bool, dataDir string, timeout int, allowedRoles map[string]bool, restrictedSource bool) {
 	//Taken from the server example, authorized keys are required for controllers
 	adminAuthorizedKeysPath := filepath.Join(dataDir, "authorized_keys")
 	authorizedControlleeKeysPath := filepath.Join(dataDir, "authorized_controllee_keys")
@@ -270,58 +328,55 @@ func StartSSHServer(sshListener net.Listener, privateKey ssh.Signer, insecure, o
 	config := &ssh.ServerConfig{
 		ServerVersion: "SSH-2.0-OpenSSH_8.0",
 		PublicKeyCallback: func(conn ssh.ConnMetadata, key ssh.PublicKey) (*ssh.Permissions, error) {
-
-			remoteIp := getIP(conn.RemoteAddr().String())
+			remoteAddr := conn.RemoteAddr()
+			remoteNetwork := remoteAddr.Network()
 			// from forwradserverport.go, effectively when pivoting and exposing the server port we have to just trust whatever structure the client gives us for our remote/local addresses,
 			// we dont want someone being able to bypass ip allow lists, so mark it as untrusted
-			isUntrustWorthy := conn.RemoteAddr().Network() == "remote_forward_tcp"
+			sourceTrusted := isSourceTrusted(remoteNetwork)
 
-			if remoteIp == nil {
-				return nil, fmt.Errorf("not authorized %q, could not parse IP address %s", conn.User(), conn.RemoteAddr())
+			var remoteIp net.IP
+			if sourceTrusted {
+				remoteIp = getIP(remoteAddr.String())
+				if remoteIp == nil {
+					return nil, fmt.Errorf("not authorized %q, could not parse IP address %s", conn.User(), remoteAddr)
+				}
 			}
 
 			// Check administrator keys first, they can impersonate users
-			perm, err := CheckAuth(adminAuthorizedKeysPath, key, remoteIp, false)
-			if err == nil && !isUntrustWorthy {
-				perm.Extensions["type"] = "user"
-				perm.Extensions["privilege"] = "5"
-
-				return perm, err
+			perm, err := CheckAuthWithSourceTrust(adminAuthorizedKeysPath, key, remoteIp, false, sourceTrusted)
+			if err == nil {
+				if !sourceTrusted {
+					return nil, untrustedUserLoginError("admin", conn.User(), remoteNetwork)
+				}
+				setUserPermissions(perm, privilegeAdmin)
+				return perm, nil
 			}
 			if err != ErrKeyNotInList {
-				err = fmt.Errorf("admin with supplied username (%s) denied login: %s", strconv.QuoteToGraphic(conn.User()), err)
-				if isUntrustWorthy {
-					err = fmt.Errorf("admin (%s) denied login: cannot connect admins via pivoted server port (may result in allow list bypass)", strconv.QuoteToGraphic(conn.User()))
-				}
-				return nil, err
+				return nil, fmt.Errorf("admin with supplied username (%s) denied login: %w", strconv.QuoteToGraphic(conn.User()), err)
 			}
 
 			// Stop path traversal
 			authorisedKeysPath := filepath.Join(usersKeysDir, filepath.Join("/", filepath.Clean(conn.User())))
-			perm, err = CheckAuth(authorisedKeysPath, key, remoteIp, false)
-			if err == nil && !isUntrustWorthy {
-				perm.Extensions["type"] = "user"
-				perm.Extensions["privilege"] = "0"
-
-				return perm, err
+			perm, err = CheckAuthWithSourceTrust(authorisedKeysPath, key, remoteIp, false, sourceTrusted)
+			if err == nil {
+				if !sourceTrusted {
+					return nil, untrustedUserLoginError("user", conn.User(), remoteNetwork)
+				}
+				setUserPermissions(perm, privilegeUser)
+				return perm, nil
 			}
 
 			if err != ErrKeyNotInList {
-				err = fmt.Errorf("user (%s) denied login: %s", strconv.QuoteToGraphic(conn.User()), err)
-				if isUntrustWorthy {
-					err = fmt.Errorf("user (%s) denied login: cannot connect users via pivoted server port (may result in allow list bypass)", strconv.QuoteToGraphic(conn.User()))
-				}
-
-				return nil, err
+				return nil, fmt.Errorf("user (%s) denied login: %w", strconv.QuoteToGraphic(conn.User()), err)
 			}
 
-			// not going to check isUntrustWorthy down here as these are often the reason we're pivoting into a place anyway
+			// not checking source trust below as these are often the reason we're pivoting into a place anyway
 
 			//If insecure mode, then any unknown client will be connected as a controllable client.
 			//The server effectively ignores channel requests from controllable clients.
-			perms, err := CheckAuth(authorizedControlleeKeysPath, key, remoteIp, insecure)
+			perms, err := CheckAuthWithSourceTrust(authorizedControlleeKeysPath, key, remoteIp, insecure, sourceTrusted)
 			if err == nil {
-				perms.Extensions["type"] = "client"
+				perms.Extensions["type"] = roleClient
 				return perms, err
 			}
 
@@ -330,10 +385,10 @@ func StartSSHServer(sshListener net.Listener, privateKey ssh.Signer, insecure, o
 				return nil, fmt.Errorf("client was denied login: %s", err)
 			}
 
-			perms, err = CheckAuth(authorizedProxyKeysPath, key, remoteIp, insecure || openproxy)
+			perms, err = CheckAuthWithSourceTrust(authorizedProxyKeysPath, key, remoteIp, insecure || openproxy, sourceTrusted)
 			if err == nil {
 
-				perms.Extensions["type"] = "proxy"
+				perms.Extensions["type"] = roleProxy
 				return perms, err
 			}
 
@@ -369,12 +424,27 @@ func StartSSHServer(sshListener net.Listener, privateKey ssh.Signer, insecure, o
 	for {
 		conn, err := sshListener.Accept()
 		if err != nil {
-			log.Printf("Failed to accept incoming connection (%s)", err)
+			if isClosedListenerError(err) {
+				return
+			}
+			log.Printf("failed to accept incoming connection (%s)", err)
 			continue
 		}
 
-		go acceptConn(conn, config, timeout, dataDir)
+		go acceptConn(conn, config, timeout, dataDir, allowedRoles, restrictedSource)
 	}
+}
+
+func isClosedListenerError(err error) bool {
+	if err == nil {
+		return false
+	}
+
+	if errors.Is(err, net.ErrClosed) {
+		return true
+	}
+
+	return strings.Contains(strings.ToLower(err.Error()), "closed network connection")
 }
 
 func getIP(ip string) net.IP {
@@ -387,7 +457,7 @@ func getIP(ip string) net.IP {
 	return nil
 }
 
-func acceptConn(c net.Conn, config *ssh.ServerConfig, timeout int, dataDir string) {
+func acceptConn(c net.Conn, config *ssh.ServerConfig, timeout int, dataDir string, allowedRoles map[string]bool, restrictedSource bool) {
 
 	//Initially set the timeout high, so people who type in their ssh key password can actually use rssh
 	realConn := &internal.TimeoutConn{Conn: c, Timeout: time.Duration(timeout) * time.Minute}
@@ -400,6 +470,15 @@ func acceptConn(c net.Conn, config *ssh.ServerConfig, timeout int, dataDir strin
 	}
 
 	clientLog := logger.NewLog(sshConn.RemoteAddr().String())
+
+	role := sshConn.Permissions.Extensions["type"]
+	if !roleAllowed(allowedRoles, role) {
+		if restrictedSource {
+			log.Printf("nat: rejected non-client role on nat listener (%s)", role)
+		}
+		sshConn.Close()
+		return
+	}
 
 	if timeout > 0 {
 		//If we are using timeouts
@@ -420,7 +499,7 @@ func acceptConn(c net.Conn, config *ssh.ServerConfig, timeout int, dataDir strin
 	}
 
 	switch sshConn.Permissions.Extensions["type"] {
-	case "user":
+	case roleUser:
 
 		// sshUser.User is used here as CreateOrGetUser can be passed a nil sshConn
 		user, connectionDetails, err := users.CreateOrGetUser(sshConn.User(), sshConn)
@@ -448,7 +527,7 @@ func acceptConn(c net.Conn, config *ssh.ServerConfig, timeout int, dataDir strin
 		// Discard all global out-of-band Requests, except for the tcpip-forward
 		go ssh.DiscardRequests(reqs)
 
-	case "client":
+	case roleClient:
 
 		id, username, err := users.AssociateClient(sshConn)
 		if err != nil {
@@ -490,7 +569,7 @@ func acceptConn(c net.Conn, config *ssh.ServerConfig, timeout int, dataDir strin
 			Timestamp: time.Now(),
 		})
 
-	case "proxy":
+	case roleProxy:
 		clientLog.Info("New remote dynamic forward connected: %s", sshConn.ClientVersion())
 
 		go internal.DiscardChannels(sshConn, chans)
