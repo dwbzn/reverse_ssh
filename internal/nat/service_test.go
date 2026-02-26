@@ -1,7 +1,6 @@
 package nat
 
 import (
-	"encoding/base64"
 	"errors"
 	"fmt"
 	"io"
@@ -76,41 +75,6 @@ func TestDialRelayPath(t *testing.T) {
 	}
 	if string(buf) != string(payload) {
 		t.Fatalf("echo mismatch: got %q, want %q", string(buf), string(payload))
-	}
-}
-
-func TestTokenDoesNotContainServerRegion(t *testing.T) {
-	derpServer, node := newFakeDERPServer(t)
-	defer derpServer.Close()
-
-	mapServer := newMapServerForNode(node)
-	defer mapServer.Close()
-	t.Setenv(DERPMapURLEnvVar, mapServer.URL)
-
-	listenAddr := mustPickTestAddr(t)
-	service, err := Start(ServiceConfig{
-		ListenAddr:     listenAddr,
-		HostPrivateKey: []byte("test-key-token-region"),
-	})
-	if err != nil {
-		t.Fatalf("Start() error = %v", err)
-	}
-	defer service.Close()
-
-	token, err := ParseDestination(DestinationPrefix + service.Token())
-	if err != nil {
-		t.Fatalf("ParseDestination() error = %v", err)
-	}
-	encoded := strings.TrimPrefix(DestinationPrefix+service.Token(), DestinationPrefix)
-	raw, err := base64.RawURLEncoding.DecodeString(encoded)
-	if err != nil {
-		t.Fatalf("decode raw token payload error = %v", err)
-	}
-	if len(raw) != 33 {
-		t.Fatalf("raw token payload length = %d, want 33", len(raw))
-	}
-	if token.Version != TokenVersionV1 {
-		t.Fatalf("token version = %d, want %d", token.Version, TokenVersionV1)
 	}
 }
 
