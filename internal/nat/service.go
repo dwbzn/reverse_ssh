@@ -22,8 +22,6 @@ const (
 
 type ServiceConfig struct {
 	ListenAddr string
-	// ExternalAddr is the reachable host:port that clients should dial.
-	ExternalAddr string
 
 	HostPrivateKey []byte
 
@@ -31,10 +29,6 @@ type ServiceConfig struct {
 
 	// Optional region hint to include in token.
 	PreferredRegion uint16
-
-	// Reserved for a future direct transport implementation.
-	DisableDirect bool
-	DisableRelay  bool
 }
 
 type relaySessionKey struct {
@@ -71,17 +65,13 @@ func Start(config ServiceConfig) (*Service, error) {
 		return nil, fmt.Errorf("host private key bytes cannot be empty")
 	}
 
-	if config.DisableRelay {
-		return nil, fmt.Errorf("nat relay transport cannot be disabled in this build")
-	}
-
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
 
 	derpMap, err := FetchDERPMap(ctx, config.DERPMapURL)
 	if err != nil {
-		log.Printf("nat: derp map fetch failed: %v", err)
-		return nil, fmt.Errorf("nat derp map fetch failed: %w", err)
+		log.Printf("ts: derp map fetch failed: %v", err)
+		return nil, fmt.Errorf("ts derp map fetch failed: %w", err)
 	}
 
 	derpPrivate, derpPublic, err := DeriveDERPIdentity(config.HostPrivateKey)
@@ -91,18 +81,7 @@ func Start(config ServiceConfig) (*Service, error) {
 
 	listenHost, listenPort, err := splitHostPort(config.ListenAddr)
 	if err != nil {
-		return nil, fmt.Errorf("invalid nat listen address: %w", err)
-	}
-
-	externalHost, externalPort, err := splitHostPort(stripScheme(config.ExternalAddr))
-	if err != nil {
-		return nil, fmt.Errorf("invalid nat external address: %w", err)
-	}
-	if externalHost == "" {
-		externalHost = listenHost
-	}
-	if externalPort == 0 {
-		externalPort = listenPort
+		return nil, fmt.Errorf("invalid ts listen address: %w", err)
 	}
 
 	regionID, derpNode, err := pickDERPNode(derpMap, int(config.PreferredRegion))
@@ -110,12 +89,10 @@ func Start(config ServiceConfig) (*Service, error) {
 		return nil, err
 	}
 
-	externalAddr := net.JoinHostPort(externalHost, strconv.Itoa(externalPort))
 	token := Token{
 		Version:             TokenVersionV1,
 		ServerDERPPublicKey: derpPublic,
 		PreferredRegion:     uint16(regionID),
-		DirectAddr:          externalAddr,
 	}
 	encodedToken, err := token.Encode()
 	if err != nil {
@@ -139,6 +116,7 @@ func Start(config ServiceConfig) (*Service, error) {
 		service.Close()
 		return nil, err
 	}
+
 	go service.recvDERPLoop()
 	go service.cleanupPendingRelaySessionsLoop()
 
@@ -236,7 +214,7 @@ func (s *Service) recvDERPLoop() {
 				return
 			default:
 			}
-			log.Printf("nat: derp receive failed: %v", err)
+			log.Printf("ts: derp receive failed: %v", err)
 
 			s.derpMu.Lock()
 			if s.derpClient == client {
@@ -247,7 +225,7 @@ func (s *Service) recvDERPLoop() {
 			continue
 		}
 
-		message, err := decodeSignalMessage(packet.Payload)
+		message, err := decodeSignalMessage(packet.Payload, s.derpPrivate, packet.Source)
 		if err != nil {
 			continue
 		}
@@ -272,7 +250,7 @@ func (s *Service) retryDERPConnect() bool {
 		}
 
 		if err := s.connectDERP(); err != nil {
-			log.Printf("nat: derp reconnect failed: %v", err)
+			log.Printf("ts: derp reconnect failed: %v", err)
 			time.Sleep(2 * time.Second)
 			continue
 		}
@@ -281,11 +259,6 @@ func (s *Service) retryDERPConnect() bool {
 }
 
 func (s *Service) handleDialInit(source [32]byte, message signalMessage) {
-	_, err := unmarshalDialInit(message.Payload)
-	if err != nil {
-		return
-	}
-
 	sessionKey := relaySessionKey{
 		Peer:      source,
 		SessionID: message.SessionID,
@@ -300,7 +273,7 @@ func (s *Service) handleDialInit(source [32]byte, message signalMessage) {
 	if session == nil {
 		if s.pendingRelaySessionsLocked() >= maxPendingRelaySessions {
 			s.sessionMu.Unlock()
-			log.Printf("nat: dropping session=%x, pending relay session limit reached", message.SessionID[:4])
+			log.Printf("ts: dropping session=%x, pending relay session limit reached", message.SessionID[:4])
 			_ = s.sendDERPSignal(source, signalMessage{
 				Type:      signalClose,
 				SessionID: message.SessionID,
@@ -322,14 +295,9 @@ func (s *Service) handleDialInit(source [32]byte, message signalMessage) {
 	}
 	s.sessionMu.Unlock()
 
-	ackPayload, err := marshalDialAck(dialAckMessage{})
-	if err != nil {
-		return
-	}
 	_ = s.sendDERPSignal(source, signalMessage{
 		Type:      signalDialAck,
 		SessionID: message.SessionID,
-		Payload:   ackPayload,
 	})
 }
 
@@ -433,7 +401,7 @@ func (s *Service) prunePendingRelaySessions() {
 }
 
 func (s *Service) sendDERPSignal(destination [32]byte, message signalMessage) error {
-	raw := encodeSignalMessage(message)
+	raw := encodeSignalMessage(message, s.derpPrivate, destination)
 
 	s.derpMu.RLock()
 	client := s.derpClient
@@ -458,12 +426,4 @@ func splitHostPort(addr string) (string, int, error) {
 		return "", 0, fmt.Errorf("invalid port %d", port)
 	}
 	return host, port, nil
-}
-
-func stripScheme(addr string) string {
-	addr = strings.TrimSpace(addr)
-	if i := strings.Index(addr, "://"); i > -1 {
-		return addr[i+3:]
-	}
-	return addr
 }

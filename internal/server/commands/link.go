@@ -76,7 +76,7 @@ func (l *link) ValidArgs() map[string]string {
 		"stdio":             "Use stdin and stdout as transport, will disable logging, destination after stdio:// is ignored",
 		"http":              "Use http polling as the underlying transport",
 		"https":             "Use https polling as the underlying transport",
-		"nat":               "Use native NAT transport (direct + relay fallback) as the underlying transport",
+		nat.Scheme:          "Use Tailscale relay transport as the underlying transport",
 		"use-host-header":   "Use HTTP Host header as callback address when generating download template (add .sh to your download urls and find out)",
 		"shared-object":     "Generate shared object file",
 		"fingerprint":       "Set RSSH server fingerprint will default to server public key",
@@ -202,7 +202,7 @@ func (l *link) Run(user *users.User, tty io.ReadWriter, line terminal.ParsedLine
 	if len(selectedTransports) == 1 {
 		selectedTransport := selectedTransports[0]
 		if selectedTransport.flag == nat.Scheme {
-			buildConfig.NAT = true
+			buildConfig.TS = true
 		} else {
 			buildConfig.ConnectBackAdress = selectedTransport.scheme + buildConfig.ConnectBackAdress
 		}

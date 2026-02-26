@@ -10,6 +10,19 @@ import (
 	"time"
 )
 
+var (
+	globalDERPPrivateKey [32]byte
+	globalDERPKeyOnce    sync.Once
+)
+
+func getGlobalDERPIdentity() ([32]byte, error) {
+	var err error
+	globalDERPKeyOnce.Do(func() {
+		globalDERPPrivateKey, _, err = randomDERPIdentity()
+	})
+	return globalDERPPrivateKey, err
+}
+
 func Dial(destination string, timeout time.Duration) (net.Conn, error) {
 	token, err := ParseDestination(destination)
 	if err != nil {
@@ -25,22 +38,22 @@ func Dial(destination string, timeout time.Duration) (net.Conn, error) {
 
 	derpMap, err := FetchDERPMap(ctx, "")
 	if err != nil {
-		return nil, fmt.Errorf("nat derp map fetch failed: %w", err)
+		return nil, fmt.Errorf("ts derp map fetch failed: %w", err)
 	}
 
-	_, derpNode, err := pickDERPNodeForClient(derpMap, int(token.PreferredRegion))
+	_, derpNode, err := pickDERPNode(derpMap, int(token.PreferredRegion))
 	if err != nil {
-		return nil, fmt.Errorf("nat derp node selection failed: %w", err)
+		return nil, fmt.Errorf("ts derp node selection failed: %w", err)
 	}
 
-	derpPrivate, _, err := randomDERPIdentity()
+	derpPrivate, err := getGlobalDERPIdentity()
 	if err != nil {
-		return nil, fmt.Errorf("nat derp key generation failed: %w", err)
+		return nil, fmt.Errorf("ts derp key generation failed: %w", err)
 	}
 
 	derpClient, err := newDERPClient(ctx, derpNode, derpPrivate)
 	if err != nil {
-		return nil, fmt.Errorf("nat derp connect failed: %w", err)
+		return nil, fmt.Errorf("ts derp connect failed: %w", err)
 	}
 
 	var sessionID [16]byte
@@ -49,16 +62,16 @@ func Dial(destination string, timeout time.Duration) (net.Conn, error) {
 		return nil, err
 	}
 
-	sendSignal := func(message signalMessage) error {
-		raw := encodeSignalMessage(message)
-		return derpClient.Send(token.ServerDERPPublicKey, raw)
-	}
-
 	var closeOnce sync.Once
 	closeDERP := func() {
 		closeOnce.Do(func() {
 			_ = derpClient.Close()
 		})
+	}
+
+	sendSignal := func(message signalMessage) error {
+		raw := encodeSignalMessage(message, derpPrivate, token.ServerDERPPublicKey)
+		return derpClient.Send(token.ServerDERPPublicKey, raw)
 	}
 
 	relay := newRelayConn(sessionID, "relay", token.ServerDERPPublicKey, sendSignal, closeDERP)
@@ -78,7 +91,7 @@ func Dial(destination string, timeout time.Duration) (net.Conn, error) {
 				continue
 			}
 
-			msg, err := decodeSignalMessage(packet.Payload)
+			msg, err := decodeSignalMessage(packet.Payload, derpPrivate, token.ServerDERPPublicKey)
 			if err != nil {
 				continue
 			}
@@ -88,9 +101,6 @@ func Dial(destination string, timeout time.Duration) (net.Conn, error) {
 
 			switch msg.Type {
 			case signalDialAck:
-				if _, err := unmarshalDialAck(msg.Payload); err != nil {
-					continue
-				}
 				select {
 				case ackCh <- struct{}{}:
 				default:
@@ -103,16 +113,9 @@ func Dial(destination string, timeout time.Duration) (net.Conn, error) {
 		}
 	}()
 
-	initPayload, err := marshalDialInit(dialInitMessage{})
-	if err != nil {
-		closeDERP()
-		return nil, err
-	}
-
 	if err := sendSignal(signalMessage{
 		Type:      signalDialInit,
 		SessionID: sessionID,
-		Payload:   initPayload,
 	}); err != nil {
 		closeDERP()
 		return nil, err
@@ -120,13 +123,13 @@ func Dial(destination string, timeout time.Duration) (net.Conn, error) {
 
 	select {
 	case <-ackCh:
-		log.Println("nat: relay session established")
+		log.Println("ts: relay session established")
 		return relay, nil
 	case err := <-recvErrCh:
 		closeDERP()
-		return nil, fmt.Errorf("nat derp session failed before ack: %w", err)
+		return nil, fmt.Errorf("ts derp session failed before ack: %w", err)
 	case <-time.After(5 * time.Second):
 		closeDERP()
-		return nil, fmt.Errorf("nat derp session acknowledgement timeout")
+		return nil, fmt.Errorf("ts derp session acknowledgement timeout")
 	}
 }

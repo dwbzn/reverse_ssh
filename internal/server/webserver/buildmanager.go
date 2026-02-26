@@ -38,7 +38,7 @@ type BuildConfig struct {
 	Proxy, SNI, LogLevel string
 
 	UseKerberosAuth bool
-	NAT             bool
+	TS              bool
 
 	SharedLibrary bool
 	UPX           bool
@@ -60,12 +60,13 @@ func Build(config BuildConfig) (string, error) {
 		return "", errors.New("web server is not enabled")
 	}
 
-	if config.NAT {
-		token := NATToken()
-		if token == "" {
-			return "", errors.New("nat transport is not enabled on this server")
+	if config.TS {
+		token, err := EnsureTSToken()
+		if err != nil {
+			return "", fmt.Errorf("ts relay transport could not be initialised: %w", err)
 		}
-		config.ConnectBackAdress = "nat://" + token
+
+		config.ConnectBackAdress = "ts://" + token
 	}
 
 	if len(config.GOARCH) != 0 && !validArchs[config.GOARCH] {

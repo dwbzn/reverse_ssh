@@ -44,19 +44,6 @@ func TestIsClosedListenerError(t *testing.T) {
 	}
 }
 
-func TestNATAllowedRoles(t *testing.T) {
-	roles := natAllowedRoles()
-	if !roles[roleClient] {
-		t.Fatalf("client role must be allowed for nat listener")
-	}
-	if roles[roleProxy] {
-		t.Fatalf("proxy role must not be allowed for nat listener")
-	}
-	if roles[roleUser] {
-		t.Fatalf("user role must not be allowed for nat listener")
-	}
-}
-
 func TestCheckAuthWithSourceTrustRejectsSourceRestrictedKeyWhenSourceUntrusted(t *testing.T) {
 	pub := generateTestPublicKey(t)
 

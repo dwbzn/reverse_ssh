@@ -56,7 +56,6 @@ func newDERPClient(ctx context.Context, node vderp.Node, privateKey [32]byte) (*
 		bw:         bw,
 		privateKey: privateKey,
 	}
-	copy(client.publicKey[:], privateKey[:])
 
 	var public [32]byte
 	curve25519.ScalarBaseMult(&public, &privateKey)
@@ -109,7 +108,6 @@ func dialDERPHTTP(ctx context.Context, node vderp.Node) (net.Conn, error) {
 		_ = httpConn.Close()
 		return nil, err
 	}
-	req.Host = address
 	req.Header.Set("Upgrade", "DERP")
 	req.Header.Set("Connection", "Upgrade")
 
@@ -183,10 +181,6 @@ func (c *derpClient) handshake() error {
 	clientInfo = append(clientInfo, encrypted...)
 
 	return writeDERPFrame(c.bw, derpFrameClientInfo, clientInfo)
-}
-
-func (c *derpClient) PublicKey() [32]byte {
-	return c.publicKey
 }
 
 func (c *derpClient) Send(dst [32]byte, payload []byte) error {

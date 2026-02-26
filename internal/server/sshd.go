@@ -291,7 +291,7 @@ func setUserPermissions(perm *ssh.Permissions, privilege string) {
 func untrustedUserLoginError(role, username, remoteNetwork string) error {
 	quotedUser := strconv.QuoteToGraphic(username)
 	if remoteNetwork == nat.RelayAddrNetwork {
-		return fmt.Errorf("%s (%s) denied login: cannot connect %ss via nat relay transport", role, quotedUser, role)
+		return fmt.Errorf("%s (%s) denied login: cannot connect %ss via ts relay transport", role, quotedUser, role)
 	}
 	return fmt.Errorf("%s (%s) denied login: cannot connect %ss via pivoted server port (may result in allow list bypass)", role, quotedUser, role)
 }
@@ -474,7 +474,7 @@ func acceptConn(c net.Conn, config *ssh.ServerConfig, timeout int, dataDir strin
 	role := sshConn.Permissions.Extensions["type"]
 	if !roleAllowed(allowedRoles, role) {
 		if restrictedSource {
-			log.Printf("nat: rejected non-client role on nat listener (%s)", role)
+			log.Printf("ts relay: rejected non-client role on ts relay listener (%s)", role)
 		}
 		sshConn.Close()
 		return

@@ -1,7 +1,6 @@
 package nat
 
 import (
-	"encoding/binary"
 	"errors"
 	"fmt"
 	"io"
@@ -13,23 +12,10 @@ import (
 
 func TestStartFailsWithoutHostPrivateKey(t *testing.T) {
 	_, err := Start(ServiceConfig{
-		ListenAddr:   "127.0.0.1:42000",
-		ExternalAddr: "127.0.0.1:42000",
+		ListenAddr: "127.0.0.1:42000",
 	})
 	if err == nil {
 		t.Fatalf("Start() should fail when host private key is missing")
-	}
-}
-
-func TestStartFailsWhenRelayDisabled(t *testing.T) {
-	_, err := Start(ServiceConfig{
-		ListenAddr:     "127.0.0.1:42000",
-		ExternalAddr:   "127.0.0.1:42000",
-		HostPrivateKey: []byte("test-key"),
-		DisableRelay:   true,
-	})
-	if err == nil {
-		t.Fatalf("Start() should fail when relay transport is disabled")
 	}
 }
 
@@ -38,7 +24,6 @@ func TestStartFailsWhenDERPMapUnavailable(t *testing.T) {
 
 	_, err := Start(ServiceConfig{
 		ListenAddr:     "127.0.0.1:42000",
-		ExternalAddr:   "127.0.0.1:42000",
 		HostPrivateKey: []byte("test-key"),
 	})
 	if err == nil {
@@ -57,7 +42,6 @@ func TestDialRelayPath(t *testing.T) {
 	listenAddr := mustPickTestAddr(t)
 	service, err := Start(ServiceConfig{
 		ListenAddr:     listenAddr,
-		ExternalAddr:   listenAddr,
 		HostPrivateKey: []byte("test-key-relay"),
 	})
 	if err != nil {
@@ -107,7 +91,6 @@ func TestDialOldDestinationAfterRestart(t *testing.T) {
 
 	serviceOne, err := Start(ServiceConfig{
 		ListenAddr:     listenAddr,
-		ExternalAddr:   listenAddr,
 		HostPrivateKey: hostKey,
 	})
 	if err != nil {
@@ -120,7 +103,6 @@ func TestDialOldDestinationAfterRestart(t *testing.T) {
 
 	serviceTwo, err := Start(ServiceConfig{
 		ListenAddr:     listenAddr,
-		ExternalAddr:   listenAddr,
 		HostPrivateKey: hostKey,
 	})
 	if err != nil {
@@ -195,94 +177,4 @@ func errorsIsNetClosed(err error) bool {
 		return true
 	}
 	return strings.Contains(strings.ToLower(err.Error()), "use of closed network connection")
-}
-
-func TestHandleDialInitCapsPendingRelaySessions(t *testing.T) {
-	service := &Service{
-		sessions: make(map[relaySessionKey]*relaySession),
-		closed:   make(chan struct{}),
-	}
-
-	payload, err := marshalDialInit(dialInitMessage{})
-	if err != nil {
-		t.Fatalf("marshalDialInit() error = %v", err)
-	}
-
-	source := [32]byte{1}
-	for i := 0; i < maxPendingRelaySessions+32; i++ {
-		var sessionID [16]byte
-		binary.BigEndian.PutUint32(sessionID[12:], uint32(i))
-
-		service.handleDialInit(source, signalMessage{
-			Type:      signalDialInit,
-			SessionID: sessionID,
-			Payload:   payload,
-		})
-	}
-
-	if got := len(service.sessions); got != maxPendingRelaySessions {
-		t.Fatalf("pending session count = %d, want %d", got, maxPendingRelaySessions)
-	}
-}
-
-func TestPrunePendingRelaySessionsRemovesStaleEntries(t *testing.T) {
-	source := [32]byte{2}
-
-	var staleSessionID [16]byte
-	var freshSessionID [16]byte
-	staleSessionID[0] = 1
-	freshSessionID[0] = 2
-
-	noOpSignal := func(signalMessage) error { return nil }
-	service := &Service{
-		sessions: make(map[relaySessionKey]*relaySession),
-		closed:   make(chan struct{}),
-	}
-
-	staleConn := newRelayConn(staleSessionID, "relay", source, noOpSignal, nil)
-	freshConn := newRelayConn(freshSessionID, "relay", source, noOpSignal, nil)
-
-	service.sessions[relaySessionKey{Peer: source, SessionID: staleSessionID}] = &relaySession{
-		conn:         staleConn,
-		accepted:     false,
-		lastActivity: time.Now().Add(-pendingRelaySessionTTL - time.Second),
-	}
-	service.sessions[relaySessionKey{Peer: source, SessionID: freshSessionID}] = &relaySession{
-		conn:         freshConn,
-		accepted:     false,
-		lastActivity: time.Now(),
-	}
-
-	service.prunePendingRelaySessions()
-
-	if _, ok := service.sessions[relaySessionKey{Peer: source, SessionID: staleSessionID}]; ok {
-		t.Fatalf("stale session was not pruned")
-	}
-	if _, ok := service.sessions[relaySessionKey{Peer: source, SessionID: freshSessionID}]; !ok {
-		t.Fatalf("fresh session should remain present")
-	}
-}
-
-func TestRouteRelayCloseRemovesSession(t *testing.T) {
-	source := [32]byte{3}
-	sessionID := [16]byte{9}
-
-	noOpSignal := func(signalMessage) error { return nil }
-	conn := newRelayConn(sessionID, "relay", source, noOpSignal, nil)
-	service := &Service{
-		sessions: map[relaySessionKey]*relaySession{
-			{Peer: source, SessionID: sessionID}: {
-				conn:         conn,
-				accepted:     false,
-				lastActivity: time.Now(),
-			},
-		},
-		closed: make(chan struct{}),
-	}
-
-	service.routeRelayClose(source, sessionID)
-
-	if len(service.sessions) != 0 {
-		t.Fatalf("expected session map to be empty after relay close, got %d entries", len(service.sessions))
-	}
 }

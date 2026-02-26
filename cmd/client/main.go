@@ -55,7 +55,7 @@ var (
 
 func printHelp() {
 	fmt.Println("usage: ", filepath.Base(os.Args[0]), "--[foreground|fingerprint|proxy|process_name] -d|--destination <server_address>")
-	fmt.Println("\t\t-d or --destination\tServer connect back address (can be baked in), e.g. host:port, ws://host:port, nat://<token>")
+	fmt.Println("\t\t-d or --destination\tServer connect back address (can be baked in), e.g. host:port, ws://host:port, ts://<token>")
 	fmt.Println("\t\t--destination-file\tRead server connect back address as file")
 	fmt.Println("\t\t--foreground\tCauses the client to run without forking to background")
 	fmt.Println("\t\t--fingerprint\tServer public key SHA256 hex fingerprint for auth")

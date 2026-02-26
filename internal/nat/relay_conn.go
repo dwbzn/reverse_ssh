@@ -10,8 +10,7 @@ import (
 	"time"
 )
 
-const derpRelayChunkSize = 60 * 1024
-const RelayAddrNetwork = "nat_relay"
+const RelayAddrNetwork = "ts_relay"
 
 type relayPeerAddr struct {
 	source [32]byte
@@ -133,8 +132,8 @@ func (c *relayConn) Write(b []byte) (int, error) {
 	written := 0
 	for written < len(b) {
 		limit := len(b) - written
-		if limit > derpRelayChunkSize {
-			limit = derpRelayChunkSize
+		if limit > 65000 {
+			limit = 65000
 		}
 		chunk := append([]byte(nil), b[written:written+limit]...)
 		if err := c.sendSignal(signalMessage{

@@ -5,45 +5,38 @@ import (
 	"encoding/binary"
 	"errors"
 	"fmt"
-	"net"
 	"strings"
 )
 
 const (
-	Scheme = "nat"
+	Scheme = "ts"
 
 	DestinationPrefix = Scheme + "://"
 	TokenVersionV1    = 1
 )
 
 var (
-	ErrInvalidDestination = errors.New("invalid nat destination")
-	ErrInvalidToken       = errors.New("invalid nat token")
+	ErrInvalidDestination = errors.New("invalid ts destination")
+	ErrInvalidToken       = errors.New("invalid ts token")
 )
 
-// Token is the versioned NAT destination payload baked into nat:// addresses.
+// Token is the versioned TS destination payload baked into ts:// addresses.
 type Token struct {
-	Version               uint8
-	ServerDirectPublicKey [32]byte
-	ServerDERPPublicKey   [32]byte
-	PreferredRegion       uint16
-	DirectAddr            string
+	Version             uint8
+	ServerDERPPublicKey [32]byte
+	PreferredRegion     uint16
 }
 
 func (t *Token) Validate() error {
 	if t.Version != TokenVersionV1 {
 		return fmt.Errorf("%w: unsupported version %d", ErrInvalidToken, t.Version)
 	}
-	if _, err := net.ResolveUDPAddr("udp", t.DirectAddr); err != nil {
-		return fmt.Errorf("%w: invalid direct address: %v", ErrInvalidToken, err)
-	}
+
 	var zero [32]byte
 	if t.ServerDERPPublicKey == zero {
 		return fmt.Errorf("%w: missing derp server key", ErrInvalidToken)
 	}
-	if t.ServerDirectPublicKey == zero {
-		return fmt.Errorf("%w: missing direct server key", ErrInvalidToken)
-	}
+
 	return nil
 }
 
@@ -52,30 +45,18 @@ func (t *Token) Encode() (string, error) {
 		return "", err
 	}
 
-	if len(t.DirectAddr) > 0xFFFF {
-		return "", fmt.Errorf("%w: address too long", ErrInvalidToken)
-	}
-
-	// version(1) + direct_pub(32) + derp_pub(32) + region(2) + direct_len(2) + direct_addr
-	total := 1 + 32 + 32 + 2 + 2 + len(t.DirectAddr)
+	// version(1) + derp_pub(32) + region(2)
+	total := 1 + 32 + 2
 	buf := make([]byte, total)
 	pos := 0
 
 	buf[pos] = t.Version
 	pos++
 
-	copy(buf[pos:pos+32], t.ServerDirectPublicKey[:])
-	pos += 32
-
 	copy(buf[pos:pos+32], t.ServerDERPPublicKey[:])
 	pos += 32
 
 	binary.BigEndian.PutUint16(buf[pos:pos+2], t.PreferredRegion)
-	pos += 2
-
-	binary.BigEndian.PutUint16(buf[pos:pos+2], uint16(len(t.DirectAddr)))
-	pos += 2
-	copy(buf[pos:pos+len(t.DirectAddr)], t.DirectAddr)
 
 	return base64.RawURLEncoding.EncodeToString(buf), nil
 }
@@ -86,9 +67,9 @@ func DecodeToken(encoded string) (*Token, error) {
 		return nil, fmt.Errorf("%w: decode failed: %v", ErrInvalidToken, err)
 	}
 
-	// version + direct_pub + derp_pub + region + direct_len
-	if len(raw) < 69 {
-		return nil, fmt.Errorf("%w: payload too short", ErrInvalidToken)
+	// version + derp_pub + region
+	if len(raw) != 35 {
+		return nil, fmt.Errorf("%w: payload length mismatch", ErrInvalidToken)
 	}
 
 	t := &Token{}
@@ -97,21 +78,10 @@ func DecodeToken(encoded string) (*Token, error) {
 	t.Version = raw[pos]
 	pos++
 
-	copy(t.ServerDirectPublicKey[:], raw[pos:pos+32])
-	pos += 32
-
 	copy(t.ServerDERPPublicKey[:], raw[pos:pos+32])
 	pos += 32
 
 	t.PreferredRegion = binary.BigEndian.Uint16(raw[pos : pos+2])
-	pos += 2
-
-	directLen := int(binary.BigEndian.Uint16(raw[pos : pos+2]))
-	pos += 2
-	if len(raw) != pos+directLen {
-		return nil, fmt.Errorf("%w: direct address length mismatch", ErrInvalidToken)
-	}
-	t.DirectAddr = string(raw[pos : pos+directLen])
 
 	if err := t.Validate(); err != nil {
 		return nil, err

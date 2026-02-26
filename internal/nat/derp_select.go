@@ -2,7 +2,9 @@ package nat
 
 import (
 	"fmt"
+	"math/rand"
 	"strings"
+	"time"
 
 	vderp "github.com/NHAS/reverse_ssh/internal/nat/derpmap"
 )
@@ -12,8 +14,7 @@ type derpRegionCandidate struct {
 	node     vderp.Node
 }
 
-// pickDERPNode is used by the server to choose a relay region.
-// Region selection is deterministic to keep transport setup predictable.
+// pickDERPNode chooses a relay region.
 func pickDERPNode(derpMap *vderp.Map, preferredRegion int) (int, vderp.Node, error) {
 	candidates, err := orderedDERPRegionCandidates(derpMap, preferredRegion)
 	if err != nil {
@@ -24,17 +25,19 @@ func pickDERPNode(derpMap *vderp.Map, preferredRegion int) (int, vderp.Node, err
 	return selected.regionID, selected.node, nil
 }
 
-// pickDERPNodeForClient mirrors server selection to avoid mismatches.
-func pickDERPNodeForClient(derpMap *vderp.Map, preferredRegion int) (int, vderp.Node, error) {
-	return pickDERPNode(derpMap, preferredRegion)
-}
-
 func orderedDERPRegionCandidates(derpMap *vderp.Map, preferredRegion int) ([]derpRegionCandidate, error) {
 	if derpMap == nil || len(derpMap.Regions) == 0 {
 		return nil, fmt.Errorf("derp map has no regions")
 	}
 
 	tryRegions := orderedRegionIDs(derpMap, preferredRegion)
+	if preferredRegion == 0 {
+		rng := rand.New(rand.NewSource(time.Now().UnixNano()))
+		rng.Shuffle(len(tryRegions), func(i, j int) {
+			tryRegions[i], tryRegions[j] = tryRegions[j], tryRegions[i]
+		})
+	}
+
 	candidates := make([]derpRegionCandidate, 0, len(tryRegions))
 	for _, regionID := range tryRegions {
 		region, ok := derpMap.Regions[regionID]
@@ -42,7 +45,7 @@ func orderedDERPRegionCandidates(derpMap *vderp.Map, preferredRegion int) ([]der
 			continue
 		}
 
-		node, ok := firstUsableNode(region.Nodes)
+		node, ok := randomUsableNode(region.Nodes)
 		if !ok {
 			continue
 		}
@@ -60,14 +63,19 @@ func orderedDERPRegionCandidates(derpMap *vderp.Map, preferredRegion int) ([]der
 	return candidates, nil
 }
 
-func firstUsableNode(nodes []vderp.Node) (vderp.Node, bool) {
+func randomUsableNode(nodes []vderp.Node) (vderp.Node, bool) {
+	var usable []vderp.Node
 	for _, node := range nodes {
 		node, ok := normaliseDERPNode(node)
 		if ok {
-			return node, true
+			usable = append(usable, node)
 		}
 	}
-	return vderp.Node{}, false
+	if len(usable) == 0 {
+		return vderp.Node{}, false
+	}
+	rng := rand.New(rand.NewSource(time.Now().UnixNano()))
+	return usable[rng.Intn(len(usable))], true
 }
 
 func normaliseDERPNode(node vderp.Node) (vderp.Node, bool) {
@@ -76,9 +84,6 @@ func normaliseDERPNode(node vderp.Node) (vderp.Node, bool) {
 	}
 	if node.DERPPort == 0 {
 		node.DERPPort = 443
-	}
-	if node.STUNPort == 0 {
-		node.STUNPort = 3478
 	}
 	return node, true
 }

@@ -7,6 +7,7 @@ import (
 	"net/http"
 	"os"
 	"strings"
+	"sync"
 	"time"
 
 	vderp "github.com/NHAS/reverse_ssh/internal/nat/derpmap"
@@ -15,6 +16,11 @@ import (
 const (
 	DefaultDERPMapURL = "https://login.tailscale.com/derpmap/default"
 	DERPMapURLEnvVar  = "RSSH_DERP_MAP_URL"
+)
+
+var (
+	cachedDERPMaps   = make(map[string]*vderp.Map)
+	cachedDERPMapsMu sync.Mutex
 )
 
 func EffectiveDERPMapURL(explicitURL string) string {
@@ -29,6 +35,13 @@ func EffectiveDERPMapURL(explicitURL string) string {
 
 func FetchDERPMap(ctx context.Context, explicitURL string) (*vderp.Map, error) {
 	url := EffectiveDERPMapURL(explicitURL)
+
+	cachedDERPMapsMu.Lock()
+	if m, ok := cachedDERPMaps[url]; ok {
+		cachedDERPMapsMu.Unlock()
+		return m, nil
+	}
+	cachedDERPMapsMu.Unlock()
 
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
 	if err != nil {
@@ -53,5 +66,12 @@ func FetchDERPMap(ctx context.Context, explicitURL string) (*vderp.Map, error) {
 		return nil, err
 	}
 
-	return vderp.ParseJSON(body)
+	parsedMap, err := vderp.ParseJSON(body)
+	if err == nil {
+		cachedDERPMapsMu.Lock()
+		cachedDERPMaps[url] = parsedMap
+		cachedDERPMapsMu.Unlock()
+	}
+
+	return parsedMap, err
 }

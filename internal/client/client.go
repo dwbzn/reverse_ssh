@@ -393,7 +393,7 @@ func Run(settings *Settings) {
 	realAddr, scheme := determineConnectionType(settings.Addr)
 	if scheme == nat.Scheme {
 		if _, err := nat.ParseDestination(settings.Addr); err != nil {
-			log.Fatalf("Invalid NAT destination %q: %v", settings.Addr, err)
+			log.Fatalf("Invalid TS destination %q: %v", settings.Addr, err)
 		}
 	}
 
@@ -407,7 +407,7 @@ func Run(settings *Settings) {
 			log.Println("Connecting to", settings.Addr)
 			conn, err = nat.Dial(settings.Addr, settings.ConnectTimeout)
 			if err != nil {
-				log.Printf("Unable to connect NAT: %v\n", err)
+				log.Printf("Unable to connect TS relay: %v\n", err)
 				time.Sleep(10 * time.Second)
 				continue
 			}

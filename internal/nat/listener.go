@@ -71,6 +71,6 @@ func (l *connListener) push(c net.Conn) error {
 	case l.connCh <- c:
 		return nil
 	case <-time.After(2 * time.Second):
-		return errors.New("nat listener overloaded")
+		return errors.New("ts relay listener overloaded")
 	}
 }
