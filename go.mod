@@ -1,8 +1,6 @@
 module github.com/NHAS/reverse_ssh
 
-go 1.24.4
-
-toolchain go1.24.5
+go 1.25.5
 
 require (
 	github.com/ActiveState/termtest/conpty v0.5.0
