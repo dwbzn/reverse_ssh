@@ -7,8 +7,7 @@ import (
 
 func TestTokenRoundTrip(t *testing.T) {
 	tok := &Token{
-		Version:         TokenVersionV1,
-		PreferredRegion: 42,
+		Version: TokenVersionV1,
 	}
 	for i := range tok.ServerDERPPublicKey {
 		tok.ServerDERPPublicKey[i] = byte(i + 7)
@@ -26,9 +25,6 @@ func TestTokenRoundTrip(t *testing.T) {
 
 	if decoded.Version != tok.Version {
 		t.Fatalf("decoded version = %d, want %d", decoded.Version, tok.Version)
-	}
-	if decoded.PreferredRegion != tok.PreferredRegion {
-		t.Fatalf("decoded preferred region = %d, want %d", decoded.PreferredRegion, tok.PreferredRegion)
 	}
 	if !bytes.Equal(decoded.ServerDERPPublicKey[:], tok.ServerDERPPublicKey[:]) {
 		t.Fatalf("decoded derp public key mismatch")

@@ -2,7 +2,6 @@ package nat
 
 import (
 	"encoding/base64"
-	"encoding/binary"
 	"errors"
 	"fmt"
 	"strings"
@@ -24,7 +23,6 @@ var (
 type Token struct {
 	Version             uint8
 	ServerDERPPublicKey [32]byte
-	PreferredRegion     uint16
 }
 
 func (t *Token) Validate() error {
@@ -45,8 +43,8 @@ func (t *Token) Encode() (string, error) {
 		return "", err
 	}
 
-	// version(1) + derp_pub(32) + region(2)
-	total := 1 + 32 + 2
+	// version(1) + derp_pub(32)
+	total := 1 + 32
 	buf := make([]byte, total)
 	pos := 0
 
@@ -54,9 +52,6 @@ func (t *Token) Encode() (string, error) {
 	pos++
 
 	copy(buf[pos:pos+32], t.ServerDERPPublicKey[:])
-	pos += 32
-
-	binary.BigEndian.PutUint16(buf[pos:pos+2], t.PreferredRegion)
 
 	return base64.RawURLEncoding.EncodeToString(buf), nil
 }
@@ -67,8 +62,8 @@ func DecodeToken(encoded string) (*Token, error) {
 		return nil, fmt.Errorf("%w: decode failed: %v", ErrInvalidToken, err)
 	}
 
-	// version + derp_pub + region
-	if len(raw) != 35 {
+	// version + derp_pub
+	if len(raw) != 33 {
 		return nil, fmt.Errorf("%w: payload length mismatch", ErrInvalidToken)
 	}
 
@@ -79,9 +74,6 @@ func DecodeToken(encoded string) (*Token, error) {
 	pos++
 
 	copy(t.ServerDERPPublicKey[:], raw[pos:pos+32])
-	pos += 32
-
-	t.PreferredRegion = binary.BigEndian.Uint16(raw[pos : pos+2])
 
 	if err := t.Validate(); err != nil {
 		return nil, err

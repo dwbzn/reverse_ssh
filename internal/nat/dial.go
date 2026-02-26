@@ -41,7 +41,7 @@ func Dial(destination string, timeout time.Duration) (net.Conn, error) {
 		return nil, fmt.Errorf("ts derp map fetch failed: %w", err)
 	}
 
-	_, derpNode, err := pickDERPNode(derpMap, int(token.PreferredRegion))
+	_, derpNode, err := pickNearestDERPNode(derpMap)
 	if err != nil {
 		return nil, fmt.Errorf("ts derp node selection failed: %w", err)
 	}
@@ -50,6 +50,7 @@ func Dial(destination string, timeout time.Duration) (net.Conn, error) {
 	if err != nil {
 		return nil, fmt.Errorf("ts derp key generation failed: %w", err)
 	}
+	signalCipher := newSignalCipher(derpPrivate, token.ServerDERPPublicKey)
 
 	derpClient, err := newDERPClient(ctx, derpNode, derpPrivate)
 	if err != nil {
@@ -70,7 +71,7 @@ func Dial(destination string, timeout time.Duration) (net.Conn, error) {
 	}
 
 	sendSignal := func(message signalMessage) error {
-		raw := encodeSignalMessage(message, derpPrivate, token.ServerDERPPublicKey)
+		raw := signalCipher.encode(message)
 		return derpClient.Send(token.ServerDERPPublicKey, raw)
 	}
 
@@ -91,7 +92,7 @@ func Dial(destination string, timeout time.Duration) (net.Conn, error) {
 				continue
 			}
 
-			msg, err := decodeSignalMessage(packet.Payload, derpPrivate, token.ServerDERPPublicKey)
+			msg, err := signalCipher.decode(packet.Payload)
 			if err != nil {
 				continue
 			}

@@ -135,11 +135,10 @@ func (c *relayConn) Write(b []byte) (int, error) {
 		if limit > 65000 {
 			limit = 65000
 		}
-		chunk := append([]byte(nil), b[written:written+limit]...)
 		if err := c.sendSignal(signalMessage{
 			Type:      signalData,
 			SessionID: c.sessionID,
-			Payload:   chunk,
+			Payload:   b[written : written+limit],
 		}); err != nil {
 			return written, err
 		}
@@ -213,7 +212,7 @@ func (c *relayConn) pushIncoming(payload []byte) bool {
 	}
 
 	select {
-	case c.incoming <- append([]byte(nil), payload...):
+	case c.incoming <- payload:
 		return true
 	case <-c.closed:
 		return false

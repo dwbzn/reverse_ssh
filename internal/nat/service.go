@@ -26,9 +26,6 @@ type ServiceConfig struct {
 	HostPrivateKey []byte
 
 	DERPMapURL string
-
-	// Optional region hint to include in token.
-	PreferredRegion uint16
 }
 
 type relaySessionKey struct {
@@ -55,6 +52,9 @@ type Service struct {
 
 	sessionMu sync.Mutex
 	sessions  map[relaySessionKey]*relaySession
+
+	signalCipherMu sync.RWMutex
+	signalCiphers  map[[32]byte]*signalCipher
 
 	closed    chan struct{}
 	closeOnce sync.Once
@@ -84,7 +84,7 @@ func Start(config ServiceConfig) (*Service, error) {
 		return nil, fmt.Errorf("invalid ts listen address: %w", err)
 	}
 
-	regionID, derpNode, err := pickDERPNode(derpMap, int(config.PreferredRegion))
+	_, derpNode, err := pickNearestDERPNode(derpMap)
 	if err != nil {
 		return nil, err
 	}
@@ -92,7 +92,6 @@ func Start(config ServiceConfig) (*Service, error) {
 	token := Token{
 		Version:             TokenVersionV1,
 		ServerDERPPublicKey: derpPublic,
-		PreferredRegion:     uint16(regionID),
 	}
 	encodedToken, err := token.Encode()
 	if err != nil {
@@ -104,12 +103,13 @@ func Start(config ServiceConfig) (*Service, error) {
 		listenerIP = net.IPv4zero
 	}
 	service := &Service{
-		token:       encodedToken,
-		listener:    newConnListener(&net.TCPAddr{IP: listenerIP, Port: listenPort}),
-		derpNode:    derpNode,
-		derpPrivate: derpPrivate,
-		sessions:    make(map[relaySessionKey]*relaySession),
-		closed:      make(chan struct{}),
+		token:         encodedToken,
+		listener:      newConnListener(&net.TCPAddr{IP: listenerIP, Port: listenPort}),
+		derpNode:      derpNode,
+		derpPrivate:   derpPrivate,
+		sessions:      make(map[relaySessionKey]*relaySession),
+		signalCiphers: make(map[[32]byte]*signalCipher),
+		closed:        make(chan struct{}),
 	}
 
 	if err := service.connectDERP(); err != nil {
@@ -181,6 +181,10 @@ func (s *Service) Close() error {
 		s.sessions = make(map[relaySessionKey]*relaySession)
 		s.sessionMu.Unlock()
 
+		s.signalCipherMu.Lock()
+		s.signalCiphers = make(map[[32]byte]*signalCipher)
+		s.signalCipherMu.Unlock()
+
 		for _, conn := range all {
 			conn.markRemoteClosed()
 			_ = conn.Close()
@@ -225,7 +229,7 @@ func (s *Service) recvDERPLoop() {
 			continue
 		}
 
-		message, err := decodeSignalMessage(packet.Payload, s.derpPrivate, packet.Source)
+		message, err := s.signalCipherForPeer(packet.Source).decode(packet.Payload)
 		if err != nil {
 			continue
 		}
@@ -401,7 +405,7 @@ func (s *Service) prunePendingRelaySessions() {
 }
 
 func (s *Service) sendDERPSignal(destination [32]byte, message signalMessage) error {
-	raw := encodeSignalMessage(message, s.derpPrivate, destination)
+	raw := s.signalCipherForPeer(destination).encode(message)
 
 	s.derpMu.RLock()
 	client := s.derpClient
@@ -411,6 +415,25 @@ func (s *Service) sendDERPSignal(destination [32]byte, message signalMessage) er
 	}
 
 	return client.Send(destination, raw)
+}
+
+func (s *Service) signalCipherForPeer(peer [32]byte) *signalCipher {
+	s.signalCipherMu.RLock()
+	cipher := s.signalCiphers[peer]
+	s.signalCipherMu.RUnlock()
+	if cipher != nil {
+		return cipher
+	}
+
+	s.signalCipherMu.Lock()
+	defer s.signalCipherMu.Unlock()
+	if cipher = s.signalCiphers[peer]; cipher != nil {
+		return cipher
+	}
+
+	cipher = newSignalCipher(s.derpPrivate, peer)
+	s.signalCiphers[peer] = cipher
+	return cipher
 }
 
 func splitHostPort(addr string) (string, int, error) {

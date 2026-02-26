@@ -19,6 +19,14 @@ import (
 	"golang.org/x/crypto/nacl/box"
 )
 
+const (
+	derpReadBufferSize  = 64 * 1024
+	derpWriteBufferSize = 128 * 1024
+	derpFlushInterval   = 2 * time.Millisecond
+	derpFlushThreshold  = 64 * 1024
+	derpFlushNowSize    = 16 * 1024
+)
+
 type derpPacket struct {
 	Source  [32]byte
 	Payload []byte
@@ -34,6 +42,9 @@ type derpClient struct {
 	publicKey    [32]byte
 
 	writeMu sync.Mutex
+
+	closed    chan struct{}
+	closeOnce sync.Once
 }
 
 type derpClientInfo struct {
@@ -47,14 +58,15 @@ func newDERPClient(ctx context.Context, node vderp.Node, privateKey [32]byte) (*
 		return nil, err
 	}
 
-	br := bufio.NewReader(conn)
-	bw := bufio.NewWriter(conn)
+	br := bufio.NewReaderSize(conn, derpReadBufferSize)
+	bw := bufio.NewWriterSize(conn, derpWriteBufferSize)
 
 	client := &derpClient{
 		conn:       conn,
 		br:         br,
 		bw:         bw,
 		privateKey: privateKey,
+		closed:     make(chan struct{}),
 	}
 
 	var public [32]byte
@@ -65,6 +77,8 @@ func newDERPClient(ctx context.Context, node vderp.Node, privateKey [32]byte) (*
 		_ = conn.Close()
 		return nil, err
 	}
+
+	go client.flushLoop()
 
 	return client, nil
 }
@@ -111,8 +125,8 @@ func dialDERPHTTP(ctx context.Context, node vderp.Node) (net.Conn, error) {
 	req.Header.Set("Upgrade", "DERP")
 	req.Header.Set("Connection", "Upgrade")
 
-	br := bufio.NewReader(httpConn)
-	bw := bufio.NewWriter(httpConn)
+	br := bufio.NewReaderSize(httpConn, derpReadBufferSize)
+	bw := bufio.NewWriterSize(httpConn, derpWriteBufferSize)
 	if err := req.Write(bw); err != nil {
 		_ = httpConn.Close()
 		return nil, err
@@ -138,7 +152,6 @@ func dialDERPHTTP(ctx context.Context, node vderp.Node) (net.Conn, error) {
 	return &readWriteConn{
 		Conn:   httpConn,
 		reader: br,
-		writer: bw,
 	}, nil
 }
 
@@ -187,13 +200,16 @@ func (c *derpClient) Send(dst [32]byte, payload []byte) error {
 	if len(payload) > 64*1024 {
 		return fmt.Errorf("derp payload too large: %d", len(payload))
 	}
-	framePayload := make([]byte, 0, 32+len(payload))
-	framePayload = append(framePayload, dst[:]...)
-	framePayload = append(framePayload, payload...)
 
 	c.writeMu.Lock()
 	defer c.writeMu.Unlock()
-	return writeDERPFrame(c.bw, derpFrameSendPacket, framePayload)
+	if err := writeDERPSendPacket(c.bw, dst, payload); err != nil {
+		return err
+	}
+	if len(payload) >= derpFlushNowSize || c.bw.Buffered() >= derpFlushThreshold {
+		return c.bw.Flush()
+	}
+	return nil
 }
 
 func (c *derpClient) sendPong(in [8]byte) error {
@@ -220,7 +236,7 @@ func (c *derpClient) Recv() (derpPacket, error) {
 			}
 			var src [32]byte
 			copy(src[:], payload[:32])
-			data := append([]byte(nil), payload[32:]...)
+			data := payload[32:]
 			return derpPacket{Source: src, Payload: data}, nil
 		case derpFramePing:
 			if len(payload) < 8 {
@@ -238,16 +254,62 @@ func (c *derpClient) Recv() (derpPacket, error) {
 }
 
 func (c *derpClient) Close() error {
-	if c.conn == nil {
+	var retErr error
+	c.closeOnce.Do(func() {
+		close(c.closed)
+
+		c.writeMu.Lock()
+		if c.bw != nil && c.bw.Buffered() > 0 {
+			_ = c.bw.Flush()
+		}
+		c.writeMu.Unlock()
+
+		if c.conn == nil {
+			return
+		}
+		retErr = c.conn.Close()
+		c.conn = nil
+	})
+	return retErr
+}
+
+func (c *derpClient) flushLoop() {
+	ticker := time.NewTicker(derpFlushInterval)
+	defer ticker.Stop()
+
+	for {
+		select {
+		case <-c.closed:
+			return
+		case <-ticker.C:
+		}
+
+		c.writeMu.Lock()
+		if c.bw.Buffered() > 0 {
+			_ = c.bw.Flush()
+		}
+		c.writeMu.Unlock()
+	}
+}
+
+func writeDERPSendPacket(w *bufio.Writer, dst [32]byte, payload []byte) error {
+	frameLen := 32 + len(payload)
+	if err := writeDERPFrameHeader(w, derpFrameSendPacket, uint32(frameLen)); err != nil {
+		return err
+	}
+	if _, err := w.Write(dst[:]); err != nil {
+		return err
+	}
+	if len(payload) == 0 {
 		return nil
 	}
-	return c.conn.Close()
+	_, err := w.Write(payload)
+	return err
 }
 
 type readWriteConn struct {
 	net.Conn
 	reader *bufio.Reader
-	writer *bufio.Writer
 }
 
 func (c *readWriteConn) Read(p []byte) (int, error) {
@@ -255,12 +317,5 @@ func (c *readWriteConn) Read(p []byte) (int, error) {
 }
 
 func (c *readWriteConn) Write(p []byte) (int, error) {
-	n, err := c.writer.Write(p)
-	if err != nil {
-		return n, err
-	}
-	if err := c.writer.Flush(); err != nil {
-		return n, err
-	}
-	return n, nil
+	return c.Conn.Write(p)
 }

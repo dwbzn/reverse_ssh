@@ -6,6 +6,7 @@ import (
 	"sync/atomic"
 
 	"golang.org/x/crypto/nacl/box"
+	"golang.org/x/crypto/nacl/secretbox"
 )
 
 const (
@@ -22,8 +23,19 @@ type signalMessage struct {
 }
 
 var globalWGCounter atomic.Uint64
+var zeroPad [16]byte
 
-func encodeSignalMessage(message signalMessage, privateKey, publicKey [32]byte) []byte {
+type signalCipher struct {
+	sharedKey [32]byte
+}
+
+func newSignalCipher(privateKey, publicKey [32]byte) *signalCipher {
+	c := &signalCipher{}
+	box.Precompute(&c.sharedKey, &publicKey, &privateKey)
+	return c
+}
+
+func (c *signalCipher) encode(message signalMessage) []byte {
 	// Fake WireGuard Transport Data packet
 
 	innerLen := 1 + 16 + len(message.Payload)
@@ -42,7 +54,7 @@ func encodeSignalMessage(message signalMessage, privateKey, publicKey [32]byte) 
 	inner = append(inner, message.Payload...)
 
 	if innerPad > 0 {
-		inner = append(inner, make([]byte, innerPad)...)
+		inner = append(inner, zeroPad[:innerPad]...)
 	}
 
 	counter := globalWGCounter.Add(1)
@@ -52,7 +64,7 @@ func encodeSignalMessage(message signalMessage, privateKey, publicKey [32]byte) 
 	var nonce [24]byte
 	copy(nonce[:], counterBuf[:])
 
-	encrypted := box.Seal(nil, inner, &nonce, &publicKey, &privateKey)
+	encrypted := secretbox.Seal(nil, inner, &nonce, &c.sharedKey)
 
 	outLen := 16 + len(encrypted)
 	out := make([]byte, 0, outLen)
@@ -67,7 +79,7 @@ func encodeSignalMessage(message signalMessage, privateKey, publicKey [32]byte) 
 	return out
 }
 
-func decodeSignalMessage(raw []byte, privateKey, publicKey [32]byte) (signalMessage, error) {
+func (c *signalCipher) decode(raw []byte) (signalMessage, error) {
 	var message signalMessage
 
 	if len(raw) == 0 {
@@ -87,7 +99,7 @@ func decodeSignalMessage(raw []byte, privateKey, publicKey [32]byte) (signalMess
 	var nonce [24]byte
 	copy(nonce[:], raw[8:16])
 
-	inner, ok := box.Open(nil, raw[16:], &nonce, &publicKey, &privateKey)
+	inner, ok := secretbox.Open(nil, raw[16:], &nonce, &c.sharedKey)
 	if !ok {
 		return message, fmt.Errorf("signal message decryption failed")
 	}
@@ -105,7 +117,15 @@ func decodeSignalMessage(raw []byte, privateKey, publicKey [32]byte) (signalMess
 
 	message.Type = payloadRaw[0]
 	copy(message.SessionID[:], payloadRaw[1:17])
-	message.Payload = append([]byte(nil), payloadRaw[17:]...)
+	message.Payload = payloadRaw[17:]
 
 	return message, nil
+}
+
+func encodeSignalMessage(message signalMessage, privateKey, publicKey [32]byte) []byte {
+	return newSignalCipher(privateKey, publicKey).encode(message)
+}
+
+func decodeSignalMessage(raw []byte, privateKey, publicKey [32]byte) (signalMessage, error) {
+	return newSignalCipher(privateKey, publicKey).decode(raw)
 }
